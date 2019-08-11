@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">NFCTag</string>
+    <string name="write_new_nfc_tag">Write New NFC Tag</string>
+</resources>

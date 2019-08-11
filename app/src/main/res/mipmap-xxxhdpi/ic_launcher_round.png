@@ -1,0 +1,311 @@
+package com.example.mdd_
+
+import android.app.Activity
+import android.content.Context
+import android.content.DialogInterface
+import android.content.Intent
+import androidx.appcompat.app.AppCompatActivity
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.Message
+import android.util.Log
+import android.view.Gravity
+import android.view.View
+import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
+import okhttp3.*
+import org.json.JSONObject
+import org.spongycastle.asn1.pkcs.CertificationRequest
+import org.spongycastle.asn1.x500.X500Name
+import java.io.*
+import java.util.*
+import javax.net.ssl.*
+import org.conscrypt.Conscrypt
+import org.conscrypt.OpenSSLECKeyFactory
+import org.json.JSONArray
+import org.spongycastle.cert.X509v3CertificateBuilder
+import org.spongycastle.asn1.x509.SubjectPublicKeyInfo
+import org.spongycastle.asn1.x9.X9ObjectIdentifiers
+import org.spongycastle.cert.X509CertificateHolder
+import org.spongycastle.cert.crmf.jcajce.JcaCertificateRequestMessage
+import org.spongycastle.crypto.generators.SCrypt
+import org.spongycastle.crypto.tls.CertificateRequest
+import org.spongycastle.crypto.util.PrivateKeyFactory
+import org.spongycastle.jcajce.provider.keystore.BC
+import org.spongycastle.jcajce.util.DefaultJcaJceHelper
+import org.spongycastle.jce.provider.BouncyCastleProvider
+import org.spongycastle.openssl.PEMException
+import org.spongycastle.openssl.PEMKeyPair
+import org.spongycastle.openssl.PEMParser
+import org.spongycastle.openssl.jcajce.JcaPEMKeyConverter
+import org.spongycastle.openssl.jcajce.JcaPEMWriter
+import org.spongycastle.operator.DefaultDigestAlgorithmIdentifierFinder
+import org.spongycastle.operator.DefaultSignatureAlgorithmIdentifierFinder
+import org.spongycastle.operator.OperatorCreationException
+import org.spongycastle.operator.bc.BcRSAContentSignerBuilder
+import org.spongycastle.operator.jcajce.JcaContentSignerBuilder
+import org.spongycastle.pkcs.PKCS10CertificationRequest
+import java.math.BigInteger
+import java.nio.charset.Charset
+import java.security.*
+import java.security.cert.*
+import java.security.cert.Certificate
+import java.security.cert.CertificateFactory.getInstance
+import java.security.spec.PKCS8EncodedKeySpec
+import java.security.spec.X509EncodedKeySpec
+
+
+class CertActivity : AppCompatActivity(){
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_cert)
+    }
+
+    fun signCert(view: View) {
+
+        Thread {
+            //Do some Network Request
+            var s = ""
+            var h = ""
+
+            try {
+                //getting key pair
+                val keyPair : PEMParser = openPEMResource(application.assets.open("ca_key.pem"))
+
+                val pemPair = keyPair.readObject() as PEMKeyPair
+
+
+                //getting private key String which will probably never be used
+                /*val keyPairString = getFileContent(application.assets.open("ca_key.pem"))
+                val index1 = keyPairString.indexOf("-----BEGIN EC PRIVATE KEY-----") + 30
+                val index2 = keyPairString.indexOf("-----END EC PRIVATE KEY-----")
+                val privKeyString = keyPairString.substring(index1, index2)*/
+
+
+                //getting certificate
+                val cert = openPEMResource(application.assets.open("ca_crt.pem"))
+                val caCertHolder = cert.readObject() as X509CertificateHolder
+                val certFactory = getInstance("X.509")
+                val inpStream = ByteArrayInputStream(caCertHolder.getEncoded())
+                val caCert = certFactory.generateCertificate(inpStream) as X509Certificate
+
+
+                val client = Helper.unsafeOkHttpClient()
+
+                // GET csr.json (certificate signing request)
+                var getURL =  "${Helper.ipAdd}/csr.json" //"https://192.168.1.203:8080/csr.json" //convert to regular string, to be signed with ca_key
+                var csrStr = ""
+
+                var request = Request.Builder()
+                    .url(getURL)
+                    .build()
+
+
+                client.newCall(request).execute().use { response ->
+                    assert(response.body() != null)
+                    val bodyStr : String = response.body()!!.string()
+                    val fileObj = JSONObject(bodyStr)
+                    csrStr = fileObj.getString("csr")
+                }
+
+
+                //convert pem string to actual csr
+                val csr = convertPemToPKCS10CertificationRequest(csrStr)
+
+
+                //SIGNING CERT
+                Security.insertProviderAt(BouncyCastleProvider(), 1)
+                val signedCertificatePEMDataStringWriter = StringWriter()
+                val pemWriter = JcaPEMWriter(signedCertificatePEMDataStringWriter)
+                pemWriter.writeObject(sign(csr, NewKeyConverter().getPrivateKey(pemPair.privateKeyInfo), pemPair, caCert))
+                pemWriter.close()
+                val signed = signedCertificatePEMDataStringWriter.toString()
+
+
+                // POST mk.crt
+                val jsonObj = JSONObject()
+                jsonObj.put("crt", signed)
+                h = Helper.sendPostRequest("crt", jsonObj.toString())
+
+
+                if(h != "{\n   \"successful\": \"true\"\n }"   ){ //space added before :
+                    val index1 = h.indexOf("{\n   \"") + 6
+                    val index2 = h.indexOf("\": ")
+                    val title = h.substring(index1, index2)
+                    val msg = h.substring(index2 + 4, h.length - 4)
+
+                    run {
+                        Looper.prepare()
+                        showAlert(title, msg)
+                        Looper.loop()
+                    }
+                }
+
+                //GET new status
+                s += Helper.sendGetRequest("status")
+
+
+                //start PassActivity
+                val intent = Intent(this, PassActivity::class.java)
+                startActivity(intent)
+
+            } catch (e: Exception) {
+                run {
+                    Looper.prepare()
+                    showAlert("Error", e.toString())
+                    Looper.loop()
+                }
+            }
+
+            //toast messages
+            runOnUiThread {
+                val myToast = Toast.makeText(applicationContext, h, Toast.LENGTH_SHORT)
+                myToast.setGravity(Gravity.LEFT, 150, 200)
+                myToast.show()
+            }
+        }.start()
+    }
+
+    //alert dialog
+    private fun showAlert(title: String, msg: String){
+        AlertDialog.Builder(this, R.style.MyAlertDialogStyle)
+            .setTitle(title)
+            .setMessage(msg)
+
+            // Specifying a listener allows you to take an action before dismissing the dialog.
+            // The dialog is automatically dismissed when a dialog button is clicked.
+            //.setPositiveButton(android.R.string.yes) { dialog, which ->
+                // Continue with delete operation
+            //}
+
+            // A null listener allows the button to dismiss the dialog and take no further action.
+            .setNegativeButton(android.R.string.ok, null)
+            .setIcon(android.R.drawable.ic_dialog_alert)
+            .show()
+    }
+
+    //back button
+    fun back(view: View){
+        val intent = Intent(this, MainActivity::class.java)
+        startActivity(intent)
+    }
+
+    //convert inputstream to PEMParser
+    private fun openPEMResource(
+        fileName: InputStream
+    ): PEMParser {
+        val fRd = BufferedReader(InputStreamReader(fileName))
+        return PEMParser(fRd)
+    }
+
+    //monstrosity that signs the csr
+    @Throws(InvalidKeyException::class, NoSuchAlgorithmException::class, NoSuchProviderException::class, SignatureException::class, IOException::class, OperatorCreationException::class, CertificateException::class)
+    fun sign(pemCSR : PKCS10CertificationRequest, caPrivate : PrivateKey, pair : PEMKeyPair, caCert : Certificate) : X509Certificate {
+
+        /*val sigAlgId = DefaultSignatureAlgorithmIdentifierFinder()
+        .find("SHA1withECDSA") //"SHA1withRSA"
+        val digAlgId = DefaultDigestAlgorithmIdentifierFinder()
+        .find(sigAlgId)*/
+
+        val key = getKeyPairNew(pair) //JcaPEMKeyConverter().getKeyPair(pair)
+        val keyInfo = SubjectPublicKeyInfo.getInstance(key
+            .public.encoded
+            )
+
+        //val inputCSR = PKCS10CertificationRequest(pemCSR)
+        val pk10Holder : PKCS10CertificationRequest = pemCSR
+
+        val issuer = X500Name.getInstance((caCert as X509Certificate).getSubjectX500Principal().getEncoded())
+
+        val myCertificateGenerator = X509v3CertificateBuilder(
+                issuer,//X500Name("CN=issuer"),//.getInstance(((X509Certificate)caCert).getSubjectX500Principal().getEncoded());,
+                BigInteger("1"),
+                Date(System.currentTimeMillis() - (365 * 60 * 60 * 1000)),
+                Date(
+                System.currentTimeMillis() + (365 * 60 * 60 * 1000)), //24 * 36 *
+                pk10Holder.getSubject(),
+                keyInfo
+                )//.addExtension(X509Extensions.)
+
+        val sigGen = JcaContentSignerBuilder("SHA256withECDSA").build(caPrivate)
+
+        val holder = myCertificateGenerator.build(sigGen)
+        val eeX509CertificateStructure = holder.toASN1Structure()
+
+        val cf : CertificateFactory = getInstance("X.509")
+
+        //read cert
+        val is1 = ByteArrayInputStream(eeX509CertificateStructure.encoded)
+        val theCert = cf.generateCertificate(is1) as X509Certificate
+        is1.close()
+
+        return theCert
+    }
+
+    //read inputstream to string
+    private fun getFileContent(
+        inputStream : InputStream//, charset : Charset
+    ) : String {
+        val reader = BufferedReader(inputStream.reader())
+        var content: String
+        try {
+            content = reader.readText()
+        } finally {
+            reader.close()
+        }
+        return content
+    }
+
+    //same as spongycastle getKeyPair but uses EC instead of ECDSA
+    @Throws(PEMException::class)
+    private fun getKeyPairNew(keyPair : PEMKeyPair) : KeyPair {
+        val helper = DefaultJcaJceHelper()
+        try
+        {
+            var algorithm =  keyPair.getPrivateKeyInfo().getPrivateKeyAlgorithm().getAlgorithm().getId();
+
+            if (X9ObjectIdentifiers.id_ecPublicKey.getId().equals(algorithm))
+            {
+                algorithm = "EC"
+            }
+
+            val keyFactory : KeyFactory = helper.createKeyFactory(algorithm)
+
+            return KeyPair(keyFactory.generatePublic(X509EncodedKeySpec(keyPair.getPublicKeyInfo().getEncoded())),
+                                keyFactory.generatePrivate(PKCS8EncodedKeySpec(keyPair.getPrivateKeyInfo().getEncoded())));
+        }
+        catch (e : PEMException)
+        {
+            throw PEMException("unable to convert key pair: " + e.underlyingException, e)
+        }
+    }
+
+    //does exactly what the name of the function says
+    @Throws(Exception::class)
+    private fun convertPemToPKCS10CertificationRequest(pem : String) : PKCS10CertificationRequest {
+        //Security.addProvider(org.bouncycastle.jce.provider.BouncyCastleProvider())
+        var newCsr : PKCS10CertificationRequest
+        var pemStream : ByteArrayInputStream
+        try {
+            pemStream = ByteArrayInputStream(pem.toByteArray()) //pem.getBytes("UTF-8")
+
+            val pemReader = BufferedReader(InputStreamReader(pemStream))
+            val pemParser = PEMParser(pemReader)
+
+            newCsr = pemParser.readObject() as PKCS10CertificationRequest //parsedObj
+
+            /*if (parsedObj is PKCS10CertificationRequest) {
+                csr = parsedObj
+
+            }*/
+
+            return newCsr
+        } catch (ex : java.lang.Exception) {
+            Log.e("\n\n\n\nIOException, convertPemToPublicKey\n\n", ex.toString())
+            throw Exception(ex)
+        }
+    }
+}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       
